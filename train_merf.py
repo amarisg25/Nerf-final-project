@@ -39,27 +39,17 @@ def train_merf(dataset : ModelParams, iteration : int, pipeline : PipelineParams
     optimizer = torch.optim.AdamW(merf.parameters(), lr=0.01)
 
     prev_loss = 0
-    loop = tqdm(range(1000))
+    loop = tqdm(range(2))
     for i in loop:
         optimizer.zero_grad()
         loss, rendering, prediction = merf()
-        if loss != prev_loss and i != 0:
-            print("Loss:", loss)
-            print("Prev Loss:", prev_loss)
-            print("Prediction:", prediction)
-        if i % 100 == 0:
-            print("before update")
-            print(merf.camera_pos)
-            print("loss.grad:", loss.grad)
         loss.backward(retain_graph=True)
+        print(merf.camera_pos.grad)
         optimizer.step()
-        if i % 100 == 0:
-            print("after update")
-            print(merf.camera_pos)
-            print("loss.grad:", loss.grad)
         prev_loss = loss.item()
-
+        
         if i % 100 == 0:
+            print("Loss: " + str(loss.item()))
             for g in optimizer.param_groups:
                 g['lr'] += 0.02
             torchvision.utils.save_image(rendering, os.path.join("merf_outputs", '{0:05d}'.format(i) + ".png"))

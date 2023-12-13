@@ -1,10 +1,9 @@
-from merfNet import MerfNet
 import torch
 from scene import Scene
 import os
 from tqdm import tqdm
 from os import makedirs
-from gaussian_renderer import render, render_RT, render_pos
+from gaussian_renderer import render
 import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
@@ -15,6 +14,7 @@ from torchvision import transforms
 from scene.cameras import Camera, MiniCam
 import torch.nn.functional as F
 from utils.graphics_utils import getProjectionMatrix
+import numpy as np
 
 
 def merf_search(dataset : ModelParams, iteration : int, pipeline : PipelineParams):
@@ -31,44 +31,72 @@ def merf_search(dataset : ModelParams, iteration : int, pipeline : PipelineParam
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+    delta = 0.1
+    num_extents = 10
+    extension_range = num_extents * delta
+    num_original_cameras_used = 1
+
     transform = transforms.Compose((
         transforms.Resize((256, 256)),
     ))
 
-    loop = tqdm(range(10))
+    loop = tqdm(range(1))
     print("duplicating cameras")
-    for camera in all_cameras:
+    for camera in all_cameras[:num_original_cameras_used]:
+        original_pos = torch.from_numpy(camera.T).to("cuda")
         mini_cam = fromGS2MiniCam(camera)
+        # print("original pos: ", original_pos)
         for i in loop:
-            new_cam = fromGS2MiniCam(mini_cam)
-            # ramdomize camera position
-            rand_pos = torch.rand(3, dtype=torch.float32, device="cuda") * 2 - 1
-            update_mini_camera(rand_pos, new_cam)
-            new_random_cameras.append(new_cam)
+            # print("random camera: ", i)
+            # generate a random direction in the range of the extension range
+            rand_dir = (torch.rand(3) - 0.5) * 2 * extension_range
+            rand_dir = rand_dir.to("cuda")
+            new_pos = original_pos + rand_dir
+            distance = torch.norm(new_pos - original_pos)
+            # print("distance: ", distance)
+            # based on distance, tune the number of extents
+            h = distance / delta
+            # print("h: ", h)
+            # linspace from original pos to new pos for each dimension
+            new_positions = torch.empty((3, int(h)), dtype=torch.float32, device="cuda")
+            for j in range(3):
+                new_positions[j] = torch.linspace(original_pos[j], new_pos[j], int(h))
+            new_positions = torch.stack((new_positions[0], new_positions[1], new_positions[2]), dim=1)
+            # print("new positions: ", new_positions)
+            for new_pos in new_positions:
+                new_cam = fromGS2MiniCam(mini_cam)
+                update_mini_camera(new_pos, new_cam)
+                new_random_cameras.append((new_cam, new_pos))
 
-    resMem = ResMem(pretrained=True)
+    print("done duplicating cameras")
+    print(len(new_random_cameras))
+
+    resmem = ResMem(pretrained=True)
+    resmem.to("cuda")
 
     original_scores = []
     print("rendering original cameras")
-    for camera in all_cameras:
+    for camera in all_cameras[:num_original_cameras_used]:
         rendering = render(camera, gaussians, pipeline, background)["render"]
         image = transform(rendering.unsqueeze(0))
-        score = resmodel.forward(image.to("cuda"))
+        score = resmem.forward(image.to("cuda")).cpu().item()
         original_scores.append(score)
-    
+
     new_scores = []
     print("rendering new cameras")
-    for camera in new_random_cameras:
+    for camera, pos in new_random_cameras:
         rendering = render(camera, gaussians, pipeline, background)["render"]
         image = transform(rendering.unsqueeze(0))
-        score = resmodel.forward(image.to("cuda"))
+        score = resmem.forward(image.to("cuda")).cpu().item()
         new_scores.append(score)
 
     print("finding best camera")
-    best_original_idx = np.argmax(np.array(original_scores))
-    best_new_idx = np.argmax(np.array(new_scores))
+    original_scores = np.array(original_scores)
+    new_scores = np.array(new_scores)
+    best_original_idx = np.argmax(original_scores)
+    best_new_idx = np.argmax(new_scores)
     best_original_camera = all_cameras[best_original_idx]
-    best_new_camera = new_random_cameras[best_original_camera]
+    best_new_camera, best_new_pos = new_random_cameras[best_new_idx]
     best_original_score = original_scores[best_original_idx]
     best_new_score = new_scores[best_new_idx]
 
@@ -76,8 +104,12 @@ def merf_search(dataset : ModelParams, iteration : int, pipeline : PipelineParam
     print("best new camera score: ", best_new_score)
     
     print("saving best cameras")
-    torchvision.utils.save_image(render(best_original_camera, gaussians, pipeline, background)["render"], "best_original_camera.png")
-    torchvision.utils.save_image(render(best_new_camera, gaussians, pipeline, background)["render"], "best_new_camera.png")
+    torchvision.utils.save_image(
+        render(best_original_camera, gaussians, pipeline, background)["render"], 
+        os.path.join("merf_outputs", "best_original_camera.png"))
+    torchvision.utils.save_image(
+        render(best_new_camera, gaussians, pipeline, background)["render"], 
+        os.path.join("merf_outputs", "best_new_camera.png"))
 
 def update_mini_camera(new_pos, mini_cam):
     R = look_at_rotation(new_pos[None, :], device="cuda")
@@ -96,7 +128,7 @@ def update_mini_camera(new_pos, mini_cam):
 
 def look_at_rotation(
     camera_position, 
-    at=((0, 0, 0),), 
+    at=((0, 1, 0),), 
     up=((0, 1, 0),),
     device="cuda"):
 

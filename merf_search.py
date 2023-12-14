@@ -31,8 +31,11 @@ def merf_search(dataset : ModelParams, iteration : int, pipeline : PipelineParam
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+    # the step size for the camera movements
     delta = 0.1
+    # the number of new cameras to generate along a direction
     num_extents = 10
+    # how far to move the orginal camera to generate new ones along that movement
     extension_range = num_extents * delta
     num_original_cameras_used = 1
 
@@ -44,6 +47,7 @@ def merf_search(dataset : ModelParams, iteration : int, pipeline : PipelineParam
     print("duplicating cameras")
     for camera in all_cameras[:num_original_cameras_used]:
         original_pos = torch.from_numpy(camera.T).to("cuda")
+        # create a new camera instance
         mini_cam = fromGS2MiniCam(camera)
         # print("original pos: ", original_pos)
         for i in loop:
@@ -51,6 +55,7 @@ def merf_search(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             # generate a random direction in the range of the extension range
             rand_dir = (torch.rand(3) - 0.5) * 2 * extension_range
             rand_dir = rand_dir.to("cuda")
+            # move the camera in that random direction
             new_pos = original_pos + rand_dir
             distance = torch.norm(new_pos - original_pos)
             # print("distance: ", distance)
@@ -58,12 +63,17 @@ def merf_search(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             h = distance / delta
             # print("h: ", h)
             # linspace from original pos to new pos for each dimension
+            # basically, create h more cameras along the movement of the camera
+            # from original position to new position, uniformly generate cameras
             new_positions = torch.empty((3, int(h)), dtype=torch.float32, device="cuda")
+            # movement is in all 3 directions, so put them together
             for j in range(3):
                 new_positions[j] = torch.linspace(original_pos[j], new_pos[j], int(h))
             new_positions = torch.stack((new_positions[0], new_positions[1], new_positions[2]), dim=1)
             # print("new positions: ", new_positions)
             for new_pos in new_positions:
+                # for each new pos we created, create a new cam instance
+                # update its parameters based on new pos
                 new_cam = fromGS2MiniCam(mini_cam)
                 update_mini_camera(new_pos, new_cam)
                 new_random_cameras.append((new_cam, new_pos))
